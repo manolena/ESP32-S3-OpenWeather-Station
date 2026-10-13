@@ -1,0 +1,21 @@
+# Private credentials (WiFi, API keys). Use secrets_example.h as template.
+secrets.h
+
+# Full size photos, a reduced copy is in docs/
+IMG_*.jpg
+
+# Build output
+build/
+*.bin
+*.elf
+*.map
+
+# Editor and OS files
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Commercial fonts, kept only locally (not redistributable)
+fonts_commercial_local/
