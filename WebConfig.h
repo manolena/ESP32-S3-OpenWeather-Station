@@ -387,8 +387,7 @@ void handleUpdateUpload() {
       return;
     }
     bool fs = server.arg("type") == "fs";
-    Serial.printf("OTA %s update: %s
-", fs ? "LittleFS" : "firmware", up.filename.c_str());
+    Serial.printf("OTA %s update: %s\n", fs ? "LittleFS" : "firmware", up.filename.c_str());
     if (fs) LittleFS.end();  // Unmount before overwriting
     otaRunning = true;
     drawOtaProgress(fs ? "Updating files..." : "Updating firmware...", 0);
@@ -412,12 +411,12 @@ void handleUpdateDone() {
   // otaRunning stays true: loop() draws nothing until the restart (LittleFS may be unmounted)
   if (otaError.length()) {
     Serial.println("OTA failed: " + otaError);
-    server.send(500, "application/json", "{"ok":false,"error":"" + jsonEscape(otaError) + ""}");
+    server.send(500, "application/json", "{\"ok\":false,\"error\":\"" + jsonEscape(otaError) + "\"}");
     restartAt = millis() + 3000;  // Restart to redraw the screen and remount LittleFS
     return;
   }
   Serial.println("OTA done, restarting");
-  server.send(200, "application/json", "{"ok":true}");
+  server.send(200, "application/json", "{\"ok\":true}");
   restartAt = millis() + 1500;
 }
 
@@ -440,8 +439,7 @@ void startArduinoOTA() {
     Serial.println("IDE OTA done");
   });
   ArduinoOTA.onError([](ota_error_t e) {
-    Serial.printf("IDE OTA error %u
-", e);
+    Serial.printf("IDE OTA error %u\n", e);
     restartAt = millis() + 3000;
   });
   ArduinoOTA.begin();  // Also starts mDNS with the hostname
