@@ -144,6 +144,12 @@ const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       <label class="check"><input type="checkbox" id="clearadmin" name="clearadmin" value="1"><span data-t="clearadmin">Remove the password</span></label>
     </div>
 
+    <div class="card">
+      <h2 data-t="otaTitle">Firmware update</h2>
+      <div class="hint" id="otaHint"></div>
+      <div class="actions" style="margin-top:10px"><a id="otaLink" href="/update"><button type="button" data-t="otaOpen">Open update page</button></a></div>
+    </div>
+
     <div class="actions">
       <button type="submit" class="primary" id="btnSave" data-t="save">Save and restart</button>
       <button type="button" class="danger" id="btnReset" data-t="reset">Factory reset</button>
@@ -170,7 +176,10 @@ const T = {
        saved:"Αποθηκεύτηκε. Επανεκκίνηση... Αν άλλαξε το δίκτυο, συνδεθείτε στο νέο δίκτυο.",
        resetAsk:"Διαγραφή όλων των ρυθμίσεων (WiFi, κλειδί, τοποθεσία);", resetDone:"Οι ρυθμίσεις διαγράφηκαν. Επανεκκίνηση σε λειτουργία ρύθμισης...",
        refreshed:"Η ανανέωση ξεκίνησε, ελέγξτε την οθόνη σε λίγα δευτερόλεπτα.", scanning:"Αναζήτηση...",
-       setupMode:"Λειτουργία ρύθμισης", days:"ημ", error:"Σφάλμα" },
+       setupMode:"Λειτουργία ρύθμισης", days:"ημ", error:"Σφάλμα",
+       otaTitle:"Ενημέρωση λογισμικού", otaOpen:"Σελίδα ενημέρωσης",
+       otaOn:"Ανεβάστε νέο firmware ή αρχεία από τον browser, ή από το Arduino IDE (θύρα δικτύου \"weather\").",
+       otaOff:"Ορίστε κωδικό πίνακα ελέγχου για να ενεργοποιηθούν οι ενημερώσεις." },
   1: { title:"Weather Station", status:"Status", time:"Time", lastUpdate:"Last update",
        network:"Network", address:"Address", uptime:"Uptime", refresh:"Refresh weather now",
        ssid:"Network name (SSID)", scan:"Scan", pass:"Password",
@@ -188,7 +197,10 @@ const T = {
        saved:"Saved. Restarting... If you changed the network, connect to the new network.",
        resetAsk:"Delete all settings (WiFi, API key, location)?", resetDone:"Settings deleted. Restarting in setup mode...",
        refreshed:"Refresh started, check the display in a few seconds.", scanning:"Scanning...",
-       setupMode:"Setup mode", days:"d", error:"Error" }
+       setupMode:"Setup mode", days:"d", error:"Error",
+       otaTitle:"Firmware update", otaOpen:"Open update page",
+       otaOn:"Upload new firmware or files from the browser, or from the Arduino IDE (network port \"weather\").",
+       otaOff:"Set a dashboard password to enable updates." }
 };
 let L = 0, cfg = null;
 const $ = id => document.getElementById(id);
@@ -202,6 +214,8 @@ function applyLang() {
   if (cfg) {
     $("apikeyHint").textContent = cfg.apiKeySet ? t("keySet") + cfg.apiKeyEnd + " · " + t("keepHint") : t("keyNone");
     $("adminHint").textContent = cfg.adminSet ? t("adminSet") : t("adminNone");
+    $("otaHint").textContent = cfg.otaEnabled ? t("otaOn") : t("otaOff");
+    $("otaLink").style.display = cfg.otaEnabled ? "" : "none";
   }
 }
 function showMsg(text, ok) { const m = $("msg"); m.textContent = text; m.className = "msg " + (ok ? "ok" : "err"); scrollTo(0, 0); }
@@ -271,6 +285,82 @@ $("lg1").onclick = () => { L = 1; applyLang(); };
 
 loadConfig().then(loadStatus);
 setInterval(loadStatus, 10000);
+</script>
+</body>
+</html>
+)rawliteral";
+
+/***************************************************************************************
+**  Firmware / LittleFS update page (/update). Sends the file with XMLHttpRequest so
+**  the upload progress can be shown. Needs the dashboard password (asked by the browser).
+***************************************************************************************/
+const char UPDATE_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Weather Station update</title>
+<style>
+  body { margin:0; background:#0b0f14; color:#e6edf3; font:15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width:560px; margin:0 auto; padding:16px; }
+  h1 { font-size:18px; color:#ffa630; }
+  .card { background:#151b23; border:1px solid #263040; border-radius:10px; padding:16px; margin-bottom:16px; }
+  h2 { font-size:15px; margin:0 0 8px; color:#ffa630; }
+  p { color:#8b98a8; font-size:13px; margin:0 0 10px; }
+  code { color:#e6edf3; }
+  input { width:100%; margin-bottom:10px; color:#e6edf3; }
+  button { padding:10px 14px; border-radius:6px; border:1px solid #ffa630; background:#ffa630; color:#111; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.5; }
+  progress { width:100%; height:18px; margin-top:12px; }
+  #msg { margin-top:10px; }
+  a { color:#ffa630; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Firmware update / Ενημέρωση</h1>
+
+  <div class="card">
+    <h2>Firmware (.bin)</h2>
+    <p>Arduino IDE: <code>Sketch &rarr; Export Compiled Binary</code>, then choose
+       <code>build/.../ESP32_ILI9341_openweathermap_16.ino.bin</code>
+       (not <code>.merged.bin</code> or <code>.bootloader.bin</code>).</p>
+    <input type="file" id="fw" accept=".bin">
+    <button onclick="send('fw')">Upload firmware</button>
+  </div>
+
+  <div class="card">
+    <h2>Files / Αρχεία (LittleFS image)</h2>
+    <p>Image of the <code>data</code> folder made with <code>mklittlefs</code> at the size of the
+       LittleFS partition, see README. Replaces all fonts and icons.</p>
+    <input type="file" id="fs" accept=".bin">
+    <button onclick="send('fs')">Upload files</button>
+  </div>
+
+  <progress id="bar" max="100" value="0" hidden></progress>
+  <div id="msg"></div>
+  <p style="margin-top:16px"><a href="/">&larr; Dashboard</a></p>
+</main>
+<script>
+function send(type) {
+  const f = document.getElementById(type).files[0];
+  const msg = document.getElementById("msg"), bar = document.getElementById("bar");
+  if (!f) { msg.textContent = "Choose a file first."; return; }
+  if (type === "fw" && f.name.indexOf("merged") >= 0) { msg.textContent = "Use the .ino.bin file, not .merged.bin."; return; }
+  document.querySelectorAll("button").forEach(b => b.disabled = true);
+  const fd = new FormData(); fd.append("file", f, f.name);
+  const x = new XMLHttpRequest();
+  x.open("POST", "/api/update?type=" + type);
+  x.upload.onprogress = e => { if (e.lengthComputable) { bar.hidden = false; bar.value = e.loaded * 100 / e.total; } };
+  x.onload = () => {
+    let r = {}; try { r = JSON.parse(x.responseText); } catch (e) {}
+    if (x.status === 200 && r.ok) { msg.textContent = "Done, restarting... The dashboard is back in about 20 seconds."; setTimeout(() => location.href = "/", 20000); }
+    else { msg.textContent = "Update failed: " + (r.error || x.status) + ". The station restarts with the old version."; }
+  };
+  x.onerror = () => { msg.textContent = "Connection lost during the upload."; };
+  msg.textContent = "Uploading, do not switch off...";
+  x.send(fd);
+}
 </script>
 </body>
 </html>

@@ -10,6 +10,11 @@
 **    http://weather.local/ for changing the settings, forcing a weather refresh and
 **    seeing the status.
 **
+**  - Firmware and LittleFS updates over WiFi (OTA), only when a dashboard password
+**    is set: from the browser at http://weather.local/update, or from the Arduino IDE
+**    (network port "weather"). A new firmware that crashes before it has connected
+**    is rolled back to the previous one by the bootloader.
+**
 **  Security: the dashboard uses plain HTTP and is meant for a home network. Set a
 **  dashboard password in the page to protect it (HTTP Basic auth, user "admin").
 **  Saved passwords and the API key are never sent back to the browser.
@@ -19,6 +24,9 @@
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <ESPmDNS.h>
+#include <Update.h>       // Firmware / LittleFS update from the browser
+#include <ArduinoOTA.h>   // Firmware upload from the Arduino IDE over WiFi
+#include <esp_ota_ops.h>  // Rollback control
 
 #include "Dashboard.h"  // HTML page of the dashboard
 
@@ -80,6 +88,11 @@ bool configPortal = false;          // True while the setup access point is runn
 bool forceWeatherUpdate = false;    // Set by the "Refresh now" button
 unsigned long restartAt = 0;        // millis() time for a planned restart, 0 = none
 String apSsid;                      // Name of the setup access point
+
+// OTA update state
+bool otaEnabled = false;            // OTA needs a dashboard password
+bool otaRunning = false;            // True while an update is being written
+String otaError = "";               // Error of the last browser update
 
 // Last weather download, shown on the dashboard
 bool lastUpdateOk = false;
@@ -184,6 +197,7 @@ void handleGetConfig() {
   j += "\"apiKeySet\":" + String(api_key.length() ? "true" : "false") + ",";
   j += "\"apiKeyEnd\":\"" + jsonEscape(api_key.length() > 4 ? api_key.substring(api_key.length() - 4) : "") + "\",";
   j += "\"adminSet\":" + String(adminPass.length() ? "true" : "false") + ",";
+  j += "\"otaEnabled\":" + String(otaEnabled ? "true" : "false") + ",";
   j += "\"lat\":\"" + jsonEscape(latitude) + "\",";
   j += "\"lon\":\"" + jsonEscape(longitude) + "\",";
   j += "\"units\":\"" + jsonEscape(units) + "\",";
@@ -331,6 +345,108 @@ void handleNotFound() {
   }
 }
 
+/***************************************************************************************
+**                          OTA: firmware / LittleFS update
+***************************************************************************************/
+// Progress on the TFT during an update (browser or Arduino IDE)
+void drawOtaProgress(const char* what, uint8_t percent) {
+  static int8_t lastPercent = -1;
+  if (lastPercent < 0) {
+    tft.unloadFont();
+    tft.fillScreen(TFT_BACKGROUND);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(TFT_ORANGE, TFT_BACKGROUND);
+    tft.setTextPadding(0);
+    tft.drawString(what, 120, 140, 4);  // Built in font 4, LittleFS may be updating
+  }
+  if (percent != lastPercent) {
+    ui.drawProgressBar(20, 170, 200, 15, percent, TFT_WHITE, TFT_BLUE);
+    lastPercent = percent;
+  }
+  if (percent >= 100) lastPercent = -1;
+}
+
+// Update page. Only with a dashboard password, the browser asks for it.
+void handleUpdatePage() {
+  if (!otaEnabled) {
+    server.send(403, "text/plain", "Set a dashboard password first to enable updates.");
+    return;
+  }
+  if (!checkAuth()) return;
+  server.send_P(200, "text/html; charset=utf-8", UPDATE_HTML);
+}
+
+// Receives the uploaded file in chunks and writes it to flash.
+// ?type=fw for firmware (.ino.bin), ?type=fs for a LittleFS image of the data folder.
+void handleUpdateUpload() {
+  HTTPUpload& up = server.upload();
+  if (up.status == UPLOAD_FILE_START) {
+    otaError = "";
+    if (!otaEnabled || !server.authenticate("admin", adminPass.c_str())) {
+      otaError = "Not authorised";
+      return;
+    }
+    bool fs = server.arg("type") == "fs";
+    Serial.printf("OTA %s update: %s
+", fs ? "LittleFS" : "firmware", up.filename.c_str());
+    if (fs) LittleFS.end();  // Unmount before overwriting
+    otaRunning = true;
+    drawOtaProgress(fs ? "Updating files..." : "Updating firmware...", 0);
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN, fs ? U_SPIFFS : U_FLASH)) otaError = Update.errorString();
+  } else if (up.status == UPLOAD_FILE_WRITE) {
+    if (otaError.length()) return;
+    if (Update.write(up.buf, up.currentSize) != up.currentSize) otaError = Update.errorString();
+    unsigned long total = server.header("Content-Length").toInt();
+    if (total) drawOtaProgress("", min(99UL, (unsigned long)Update.progress() * 100UL / total));
+  } else if (up.status == UPLOAD_FILE_END) {
+    if (otaError.length() == 0 && !Update.end(true)) otaError = Update.errorString();
+    if (otaError.length() == 0) drawOtaProgress("", 100);
+  } else if (up.status == UPLOAD_FILE_ABORTED) {
+    Update.abort();
+    otaError = "Upload aborted";
+  }
+}
+
+// Called after the upload has finished: report the result and restart
+void handleUpdateDone() {
+  // otaRunning stays true: loop() draws nothing until the restart (LittleFS may be unmounted)
+  if (otaError.length()) {
+    Serial.println("OTA failed: " + otaError);
+    server.send(500, "application/json", "{"ok":false,"error":"" + jsonEscape(otaError) + ""}");
+    restartAt = millis() + 3000;  // Restart to redraw the screen and remount LittleFS
+    return;
+  }
+  Serial.println("OTA done, restarting");
+  server.send(200, "application/json", "{"ok":true}");
+  restartAt = millis() + 1500;
+}
+
+// Upload from the Arduino IDE (network port), same password as the dashboard
+void startArduinoOTA() {
+  ArduinoOTA.setHostname(MDNS_HOSTNAME);
+  ArduinoOTA.setPassword(adminPass.c_str());
+  ArduinoOTA.onStart([]() {
+    otaRunning = true;
+    bool fs = ArduinoOTA.getCommand() == U_SPIFFS;
+    if (fs) LittleFS.end();
+    Serial.println(fs ? "IDE OTA: LittleFS" : "IDE OTA: firmware");
+    drawOtaProgress(fs ? "Updating files..." : "Updating firmware...", 0);
+  });
+  ArduinoOTA.onProgress([](unsigned int done, unsigned int total) {
+    drawOtaProgress("", total ? done * 100UL / total : 0);
+  });
+  ArduinoOTA.onEnd([]() {
+    drawOtaProgress("", 100);
+    Serial.println("IDE OTA done");
+  });
+  ArduinoOTA.onError([](ota_error_t e) {
+    Serial.printf("IDE OTA error %u
+", e);
+    restartAt = millis() + 3000;
+  });
+  ArduinoOTA.begin();  // Also starts mDNS with the hostname
+}
+
 void setupRoutes() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/api/config", HTTP_GET, handleGetConfig);
@@ -339,6 +455,8 @@ void setupRoutes() {
   server.on("/api/scan", HTTP_GET, handleScan);
   server.on("/api/refresh", HTTP_POST, handleRefresh);
   server.on("/api/reset", HTTP_POST, handleReset);
+  server.on("/update", HTTP_GET, handleUpdatePage);
+  server.on("/api/update", HTTP_POST, handleUpdateDone, handleUpdateUpload);
   server.onNotFound(handleNotFound);
 }
 
@@ -348,10 +466,31 @@ void setupRoutes() {
 void handleWeb() {
   if (configPortal) dnsServer.processNextRequest();
   server.handleClient();
+  if (otaEnabled) ArduinoOTA.handle();
   if (restartAt && (long)(millis() - restartAt) >= 0) {
     Serial.println("Restarting to apply the new settings...");
     delay(100);
     ESP.restart();
+  }
+}
+
+/***************************************************************************************
+**                          OTA rollback
+***************************************************************************************/
+// Tell the ESP32 core not to accept a new firmware automatically at boot. The sketch
+// accepts it with markFirmwareValid() once its network services are running. If a new
+// firmware crashes before that, the bootloader starts the previous one again.
+// extern "C": replaces the weak C function of the same name in the ESP32 core.
+extern "C" bool verifyRollbackLater() {
+  return true;
+}
+
+void markFirmwareValid() {
+  const esp_partition_t* running = esp_ota_get_running_partition();
+  esp_ota_img_states_t state;
+  if (esp_ota_get_state_partition(running, &state) == ESP_OK && state == ESP_OTA_IMG_PENDING_VERIFY) {
+    esp_ota_mark_app_valid_cancel_rollback();
+    Serial.println("New firmware accepted");
   }
 }
 
@@ -375,9 +514,19 @@ bool connectWiFi(unsigned long timeoutMs) {
 
 // Start the dashboard on the home network (station mode)
 void startDashboard() {
+  // Header used for the progress bar of browser updates
+  const char* headers[] = { "Content-Length" };
+  server.collectHeaders(headers, 1);
   setupRoutes();
   server.begin();
-  if (MDNS.begin(MDNS_HOSTNAME)) MDNS.addService("http", "tcp", 80);
+
+  otaEnabled = adminPass.length() > 0;
+  if (otaEnabled) startArduinoOTA();  // Starts mDNS too
+  else MDNS.begin(MDNS_HOSTNAME);
+  MDNS.addService("http", "tcp", 80);
+  Serial.println(otaEnabled ? "OTA updates enabled" : "OTA updates disabled (no dashboard password)");
+  markFirmwareValid();  // Network services run, keep this firmware
+
   Serial.print("Dashboard: http://");
   Serial.print(WiFi.localIP());
   Serial.println("/  or  http://" MDNS_HOSTNAME ".local/");
@@ -424,6 +573,8 @@ void startConfigPortal() {
   dnsServer.start(53, "*", WiFi.softAPIP());  // Answer every DNS request with our IP
   setupRoutes();
   server.begin();
+
+  markFirmwareValid();  // Setup mode works, keep this firmware
 
   Serial.printf("Setup mode: connect to WiFi \"%s\" (password \"%s\") and open http://%s/\n",
                 apSsid.c_str(), CONFIG_AP_PASSWORD, WiFi.softAPIP().toString().c_str());

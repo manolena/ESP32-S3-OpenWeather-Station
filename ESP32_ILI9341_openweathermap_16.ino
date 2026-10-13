@@ -230,6 +230,7 @@ void loop() {
 
   // 0. Serve the web dashboard (also restarts the station after saving settings)
   handleWeb();
+  if (otaRunning) return;  // Update in progress: keep the screen and LittleFS untouched
 
   // 1. Sync the clock with NTP on boot and then once per minute. This must run
   //    before the first weather screen, or the date is drawn as 01 JAN 1970.

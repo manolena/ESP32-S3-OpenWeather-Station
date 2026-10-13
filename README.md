@@ -29,6 +29,7 @@ original weather station by [Daniel Eichhorn (ThingPulse / Squix)](https://blog.
   time zone, rotation and update interval, status and "refresh now"
 - **Setup access point** with captive portal on first boot or when WiFi fails
 - Greek or English display and dashboard
+- **OTA updates** over WiFi from the browser or the Arduino IDE, with automatic rollback
 - Free anti-aliased fonts (Noto Sans, SIL Open Font License) with Greek characters
 - Optional: values from a ThingSpeak channel (tank monitor), disabled by default
 
@@ -158,10 +159,10 @@ Both tools are in `Arduino15/packages/esp32/tools/`. The offsets of every scheme
 | Language                   | Display and dashboard language: Ελληνικά / English          |
 | Rotation                   | Normal or upside down                                        |
 | Time zone                  | Eastern/Central Europe, UK, US zones, Australia Eastern      |
-| Dashboard password         | Optional, HTTP Basic auth with user `admin`                  |
+| Dashboard password         | Optional, HTTP Basic auth with user `admin`. Also enables OTA updates |
 
-Other buttons: **Refresh weather now**, **Factory reset** (deletes all settings and
-starts the setup access point again).
+Other buttons: **Refresh weather now**, **Firmware update** (see below),
+**Factory reset** (deletes all settings and starts the setup access point again).
 
 If the saved WiFi is not reachable at boot (e.g. router off), the setup access point
 starts and the station retries the saved WiFi every 5 minutes.
@@ -171,6 +172,34 @@ Settings are stored in flash (NVS) and are kept when you upload a new sketch.
 > **Security:** the dashboard uses plain HTTP and is meant for your home network only.
 > Do not forward it to the internet. Set a dashboard password if other people use your
 > network. Saved passwords and the API key are never sent back to the browser.
+
+## Updating over WiFi (OTA)
+
+OTA updates are enabled when a **dashboard password** is set (dashboard, section
+*Dashboard password*). The same password protects the updates. Settings are kept.
+The first OTA capable firmware has to be uploaded once over USB.
+
+**From the Arduino IDE:** select the network port **weather at 192.168.x.x** in
+*Tools → Port* and click Upload. The IDE asks for the dashboard password.
+
+**From the browser:**
+
+1. In the Arduino IDE use *Sketch → Export Compiled Binary*.
+2. Open `http://weather.local/update` (or the *Firmware update* card in the dashboard).
+3. Choose `build/esp32.esp32.esp32s3/ESP32_ILI9341_openweathermap_16.ino.bin`
+   (not `.merged.bin` or `.bootloader.bin`) and press **Upload firmware**.
+
+The data folder (fonts, icons) can be updated the same way with a LittleFS image,
+**Upload files**. Build the image at the size of the LittleFS partition, for
+`8M with spiffs`:
+
+```bash
+mklittlefs -c data -b 4096 -p 256 -s 0x180000 littlefs.bin
+```
+
+The display shows the progress and the station restarts when done.
+If the new firmware crashes before it connects to the network, the bootloader
+automatically starts the previous firmware again.
 
 ### Optional build time defaults
 
@@ -216,8 +245,8 @@ At the top of the `.ino`:
 ESP32_ILI9341_openweathermap_16/
 ├── ESP32_ILI9341_openweathermap_16.ino  Main sketch: setup, loop, all drawing
 ├── All_Settings.h                       First boot defaults, fixed settings, display texts
-├── WebConfig.h                          Settings storage, setup access point, web server
-├── Dashboard.h                          HTML page of the dashboard
+├── WebConfig.h                          Settings, setup access point, web server, OTA
+├── Dashboard.h                          HTML pages: dashboard and update page
 ├── secrets_example.h                    Template for optional build time defaults
 ├── NTP_Time.h                           NTP time sync and time zone rules
 ├── GfxUi.h / GfxUi.cpp                  BMP drawing and progress bar
@@ -252,6 +281,8 @@ Optional splash images can be added as `data/splash/OpenWeather.jpg` and
 | Crash in `TFT_eSPI::begin()` | Keep `#define USE_HSPI_PORT` in the TFT_eSPI setup file. |
 | `fatal error: tjpgd.h` / `TimeLib.h` / `JSON_Decoder.h` missing | Incomplete library install. Remove the library and install it again. |
 | Port busy during upload | Close the Serial Monitor first. |
+| No "weather" network port in the IDE | Set a dashboard password (OTA is off without it), check that the PC is on the same network, restart the IDE. |
+| Browser update fails with "Not authorised" | Reload the update page and enter the dashboard password (user `admin`). |
 | No compass under the wind letter | `data/wind/*.bmp` missing in LittleFS. |
 
 ## Credits
