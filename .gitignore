@@ -19,3 +19,6 @@ desktop.ini
 
 # Commercial fonts, kept only locally (not redistributable)
 fonts_commercial_local/
+
+# Archives (not part of the LittleFS data)
+*.zip
